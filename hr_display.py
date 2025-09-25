@@ -2,8 +2,12 @@
 """
 hr_display.py
 
-Plot heart rate monitor data from a CSV file located in the `data` directory.
+Plot heart rate monitor data from one or more files located in the `data` directory.
 Reads zone thresholds from config.yaml using OmegaConf.
+
+Usage:
+- With argument: hr_display.py <filename>
+- Without argument: hr_display.py   (plots all files in `data`, oldest first, saves to PDF in `reports`)
 """
 
 import sys
@@ -11,7 +15,9 @@ import pathlib
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib as mpl  # use mpl.colormaps
+from matplotlib.backends.backend_pdf import PdfPages
 from omegaconf import OmegaConf
+from datetime import datetime
 
 
 def load_config(config_path: pathlib.Path) -> list[int]:
@@ -21,7 +27,7 @@ def load_config(config_path: pathlib.Path) -> list[int]:
 
 
 def load_data(filepath: pathlib.Path) -> pd.DataFrame:
-    """Load heart rate data from a CSV file."""
+    """Load heart rate data from a CSV-like file."""
     return pd.read_csv(filepath, skipinitialspace=True)
 
 
@@ -63,14 +69,17 @@ def compute_percentages(values: list[float]) -> list[int]:
     return rounded
 
 
-def plot_data(df: pd.DataFrame, filename: str, thresholds: list[int]) -> None:
+def plot_data(df: pd.DataFrame, filename: str, thresholds: list[int],
+              y_limits: tuple[int, int] | None = None) -> plt.Figure:
     """
-    Plot heart rate data (left, ~2/3 width) and time in zones histogram (right, ~1/3 width).
+    Create a figure with heart rate data (left, ~2/3 width) and time in zones histogram (right, ~1/3 width).
     - Elapsed Time shown in minutes.
     - Heart rate values of 0 are skipped.
     - Grid with thin lines is displayed.
     - Histogram uses tab20b colors and shows percentages above bars.
     - Mark maximum HR with red dot and label (first occurrence only).
+    - Apply y_limits if provided.
+    Returns the matplotlib Figure.
     """
     # Remove rows where Heartrate is 0 (missing values)
     df = df[df['Heartrate'] != 0].copy()
@@ -95,6 +104,11 @@ def plot_data(df: pd.DataFrame, filename: str, thresholds: list[int]) -> None:
     ax1.set_title(filename)
     ax1.grid(True, linewidth=0.5, zorder=1)
 
+    if y_limits:
+        ymin, ymax = y_limits
+        # add a little headroom to the top
+        ax1.set_ylim(ymin, ymax * 1.02)
+
     # Mark maximum HR (first occurrence), behind the line
     if not df.empty:
         max_hr = df['Heartrate'].max()
@@ -114,12 +128,12 @@ def plot_data(df: pd.DataFrame, filename: str, thresholds: list[int]) -> None:
     ax2.grid(True, axis='y', linewidth=0.5)
 
     # Add percentages above bars
-    ymax = max(zone_times) if zone_times else 0
+    ymax_hist = max(zone_times) if zone_times else 0
     for bar, pct in zip(bars, percentages):
         height = bar.get_height()
         ax2.text(
             bar.get_x() + bar.get_width() / 2,
-            height + ymax * 0.02,
+            height + ymax_hist * 0.02,
             f'{pct}%',
             ha='center',
             va='bottom',
@@ -127,35 +141,73 @@ def plot_data(df: pd.DataFrame, filename: str, thresholds: list[int]) -> None:
         )
 
     # Add headroom so text doesn’t overlap top
-    ax2.set_ylim(0, ymax * 1.15 if ymax > 0 else 1)
+    ax2.set_ylim(0, ymax_hist * 1.15 if ymax_hist > 0 else 1)
 
     plt.tight_layout()
-    plt.show()
+    return fig
 
 
 def main() -> None:
     """Main entry point of the script."""
-    if len(sys.argv) != 2:
-        print(f'Usage: {sys.argv[0]} <filename.csv>')
-        sys.exit(1)
-
     data_dir = pathlib.Path('data')
+    reports_dir = pathlib.Path('reports')
     config_path = pathlib.Path('config.yaml')
-
-    filename = sys.argv[1]
-    filepath = data_dir / filename
-
-    if not filepath.exists():
-        print(f'Error: file {filepath} does not exist.')
-        sys.exit(1)
 
     if not config_path.exists():
         print(f'Error: config file {config_path} does not exist.')
         sys.exit(1)
 
     thresholds = load_config(config_path)
-    df = load_data(filepath)
-    plot_data(df, filename, thresholds)
+
+    if len(sys.argv) == 2:
+        # Single file mode (interactive display)
+        filename = sys.argv[1]
+        filepath = data_dir / filename
+
+        if not filepath.exists():
+            print(f'Error: file {filepath} does not exist.')
+            sys.exit(1)
+
+        df = load_data(filepath)
+        fig = plot_data(df, filename, thresholds)
+        plt.show()
+    elif len(sys.argv) == 1:
+        # Multi-file mode: all files in data dir, sorted by creation time, save to PDF
+        files = sorted(
+            [f for f in data_dir.iterdir() if f.is_file()],
+            key=lambda f: f.stat().st_ctime
+        )
+
+        if not files:
+            print(f'No files found in {data_dir}')
+            sys.exit(1)
+
+        # Determine global y-limits across all files
+        y_min, y_max = None, None
+        dataframes = []
+        for filepath in files:
+            df = load_data(filepath)
+            df = df[df['Heartrate'] != 0]
+            if not df.empty:
+                current_min, current_max = df['Heartrate'].min(), df['Heartrate'].max()
+                y_min = current_min if y_min is None else min(y_min, current_min)
+                y_max = current_max if y_max is None else max(y_max, current_max)
+            dataframes.append((filepath, df))
+
+        reports_dir.mkdir(exist_ok=True)
+        timestamp = datetime.now().strftime("%Y-%m-%d-%H:%M:%S")
+        pdf_path = reports_dir / f'{timestamp}.pdf'
+
+        with PdfPages(pdf_path) as pdf:
+            for filepath, df in dataframes:
+                fig = plot_data(df, filepath.name, thresholds, (y_min, y_max))
+                pdf.savefig(fig)
+                plt.close(fig)
+
+        print(f'Report saved to {pdf_path}')
+    else:
+        print(f'Usage: {sys.argv[0]} [<filename>]')
+        sys.exit(1)
 
 
 if __name__ == '__main__':
