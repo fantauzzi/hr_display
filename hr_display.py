@@ -7,7 +7,7 @@ Reads zone thresholds from config.yaml using OmegaConf.
 
 Usage:
 - With argument: hr_display.py <filename>
-- Without argument: hr_display.py   (plots all files in `data`, oldest first, saves to PDF in `reports`)
+- Without argument: hr_display.py   (plots all files in `data`, alphabetically descending, saves to PDF in `reports`)
 """
 
 import sys
@@ -76,9 +76,11 @@ def plot_data(df: pd.DataFrame, filename: str, thresholds: list[int],
     - Elapsed Time shown in minutes.
     - Heart rate values of 0 are skipped.
     - Grid with thin lines is displayed.
-    - Histogram uses tab20b colors and shows percentages above bars.
+    - Histogram uses Set2 colors and shows percentages above bars.
     - Mark maximum HR with red dot and label (first occurrence only).
-    - Apply y_limits if provided.
+    - Zone bands are shown on HR plot with the same colors as the histogram.
+    - Apply y_limits if provided (do not alter them for zone bands).
+    - Line plot title includes filename and total duration (MM:SS).
     Returns the matplotlib Figure.
     """
     # Remove rows where Heartrate is 0 (missing values)
@@ -86,6 +88,16 @@ def plot_data(df: pd.DataFrame, filename: str, thresholds: list[int],
 
     # Convert elapsed time from ms to minutes
     df['Minutes'] = df['Elapsed Time'] / 60000.0
+
+    # Compute total duration
+    if not df.empty and 'Elapsed Time' in df.columns:
+        total_ms = df['Elapsed Time'].iloc[-1]
+        total_seconds = int(total_ms / 1000)
+        minutes = total_seconds // 60
+        seconds = total_seconds % 60
+        duration_str = f"{minutes:02d}:{seconds:02d}"
+    else:
+        duration_str = "00:00"
 
     # Compute zone times
     zone_times = compute_zone_times(df, thresholds)
@@ -97,11 +109,15 @@ def plot_data(df: pd.DataFrame, filename: str, thresholds: list[int],
         1, 2, figsize=(12, 6), gridspec_kw={'width_ratios': [2, 1]}
     )
 
+    # Define colormap and colors (highly distinct)
+    cmap = mpl.colormaps['Set2']
+    bar_colors = [cmap(i % cmap.N) for i in range(num_zones)]
+
     # Left: HR vs time (blue line)
     ax1.plot(df['Minutes'], df['Heartrate'], color='blue', zorder=2)
     ax1.set_xlabel('Elapsed Time (minutes)')
     ax1.set_ylabel('Heart Rate (bpm)')
-    ax1.set_title(filename)
+    ax1.set_title(f"{filename} {duration_str}")
     ax1.grid(True, linewidth=0.5, zorder=1)
 
     if y_limits:
@@ -109,17 +125,24 @@ def plot_data(df: pd.DataFrame, filename: str, thresholds: list[int],
         # add a little headroom to the top
         ax1.set_ylim(ymin, ymax * 1.02)
 
-    # Mark maximum HR (first occurrence), behind the line
+    # --- Add horizontal colored bands for HR zones (AFTER y-limits are known) ---
+    bins = [0] + thresholds + [float('inf')]
+    current_ylim = ax1.get_ylim()
+    top_limit = current_ylim[1]
+    for (low, high), color in zip(zip(bins[:-1], bins[1:]), bar_colors):
+        band_top = high if high != float('inf') else top_limit
+        ax1.axhspan(low, band_top, facecolor=color, alpha=0.25, zorder=0)
+    # ---------------------------------------------------------------------------
+
+    # Mark maximum HR (first occurrence)
     if not df.empty:
         max_hr = df['Heartrate'].max()
         max_idx = df['Heartrate'].idxmax()
         max_time = df.loc[max_idx, 'Minutes']
-        ax1.scatter(max_time, max_hr, color='red', zorder=1)
+        ax1.scatter(max_time, max_hr, color='red', zorder=3)
         ax1.text(max_time, max_hr, f' {max_hr}', color='red', va='bottom')
 
-    # Right: histogram of time in zones (tab20b colors)
-    cmap = mpl.colormaps['tab20b']
-    bar_colors = [cmap(i % cmap.N) for i in range(num_zones)]
+    # Right: histogram of time in zones (Set2 colors)
     bars = ax2.bar(zone_labels, zone_times, color=bar_colors)
 
     ax2.set_xlabel('Heart Rate Zones')
@@ -172,10 +195,11 @@ def main() -> None:
         fig = plot_data(df, filename, thresholds)
         plt.show()
     elif len(sys.argv) == 1:
-        # Multi-file mode: all files in data dir, sorted by creation time, save to PDF
+        # Multi-file mode: all files in data dir, sorted alphabetically descending, save to PDF
         files = sorted(
             [f for f in data_dir.iterdir() if f.is_file()],
-            key=lambda f: f.stat().st_ctime
+            key=lambda f: f.name.lower(),
+            reverse=True
         )
 
         if not files:
